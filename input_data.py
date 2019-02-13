@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-#
-# Modifications Copyright  2018 Peter Mølgaard Sørensen
-# - Added option of using MFSC instead of MFCC as input features
-# - Only "Silence"-samples are mixed with background noise, as training data is assumed to be mixed with noise before
-#   training
-#
-
 """Model definitions for simple speech recognition.
 
 """
@@ -160,14 +153,14 @@ class AudioProcessor(object):
 
   def __init__(self, data_url, data_dir, silence_percentage, unknown_percentage,
                wanted_words, validation_percentage, testing_percentage,
-               model_settings,input_type,spectrogram_magntide_squared):
+               model_settings,input_type,volume_scale = 1.0):
     self.data_dir = data_dir
     self.maybe_download_and_extract_dataset(data_url, data_dir)
     self.prepare_data_index(silence_percentage, unknown_percentage,
                             wanted_words, validation_percentage,
                             testing_percentage)
     self.prepare_background_data()
-    self.prepare_processing_graph(model_settings,input_type,spectrogram_magntide_squared)
+    self.prepare_processing_graph(model_settings,input_type,volume_scale)
 
   def maybe_download_and_extract_dataset(self, data_url, dest_directory):
     """Download and extract data set tar file.
@@ -188,7 +181,6 @@ class AudioProcessor(object):
       os.makedirs(dest_directory)
     filename = data_url.split('/')[-1]
     filepath = os.path.join(dest_directory, filename)
-    print('Downloading dataset')
     if not os.path.exists(filepath):
 
       def _progress(count, block_size, total_size):
@@ -333,7 +325,7 @@ class AudioProcessor(object):
       if not self.background_data:
         raise Exception('No background wav files were found in ' + search_path)
 
-  def prepare_processing_graph(self, model_settings, input_type,spectrogram_magntide_squared):
+  def prepare_processing_graph(self, model_settings, input_type,volume_scale):
     """Builds a TensorFlow graph to apply the input distortions.
 
     Creates a graph that loads a WAVE file, decodes it, scales the volume,
@@ -381,16 +373,14 @@ class AudioProcessor(object):
                                  self.background_volume_placeholder_)
     background_add = tf.add(background_mul, sliced_foreground)        # Noise is added to clean speech signal
     background_clamp = tf.clip_by_value(background_add, -1.0, 1.0)
+    background_clamp = tf.multiply(background_clamp,volume_scale)
+    background_clamp = tf.clip_by_value(background_clamp, -1.0, 1.0)
     # Run the spectrogram and MFCC ops to get a 2D 'fingerprint' of the audio.
-    if(spectrogram_magntide_squared):
-      print("Using power spectrogram")
-    else:
-      print("Using magnitude spectrogram")
     spectrogram = contrib_audio.audio_spectrogram(
         background_clamp,
         window_size=model_settings['window_size_samples'],
         stride=model_settings['window_stride_samples'],
-        magnitude_squared=spectrogram_magntide_squared)
+        magnitude_squared=True)
     if (input_type == 'log-mel'):
       print("log-mel energies")
       # Warp the linear-scale, magnitude spectrograms into the mel-scale.
@@ -457,7 +447,7 @@ class AudioProcessor(object):
       sample_count = max(0, min(how_many, len(candidates) - offset))
     # Data and labels will be populated and returned.
     data = np.zeros((sample_count, model_settings['fingerprint_size']))
-    labels = np.zeros(sample_count)
+    labels = np.zeros((sample_count, model_settings['label_count']))
     desired_samples = model_settings['desired_samples']
     use_background = self.background_data and (mode == 'training')
     pick_deterministically = (mode != 'training')
@@ -512,7 +502,7 @@ class AudioProcessor(object):
       # Run the graph to produce the output audio.
       data[i - offset, :] = sess.run(self.mfcc_, feed_dict=input_dict).flatten()
       label_index = self.word_to_index[sample['label']]
-      labels[i - offset] = label_index
+      labels[i - offset, label_index] = 1
     return data, labels
 
   def get_unprocessed_data(self, how_many, model_settings, mode):
